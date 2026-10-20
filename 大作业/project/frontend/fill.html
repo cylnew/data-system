@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>填写问卷</title>
+<style>
+  body { font-family: -apple-system, "Segoe UI", sans-serif; max-width: 720px; margin: 24px auto; padding: 0 16px; }
+  .q { border: 1px solid #ddd; padding: 14px; margin: 12px 0; border-radius: 6px; }
+  .q h4 { margin: 0 0 8px 0; }
+  .err { color: #c00; }
+  .ok { color: #0a0; }
+  button { padding: 8px 16px; }
+  .muted { color: #888; font-size: 12px; }
+</style>
+</head>
+<body>
+<h1 id="title">加载中…</h1>
+<p id="desc" class="muted"></p>
+<hr>
+<form id="form"></form>
+<button onclick="submit()">提交</button>
+<div id="msg"></div>
+
+<script>
+const params = new URLSearchParams(location.search);
+const link = params.get("link");
+let TOKEN = localStorage.getItem("token") || "";
+let survey = null;
+let currentOrder = 1;
+let answers = {};  // questionId -> value
+let orders = [];   // 顺序数组
+
+const API = location.origin + "/api";
+
+async function api(method, path, body=null) {
+  const opt = { method, headers: { "Content-Type": "application/json" } };
+  if (TOKEN) opt.headers["Authorization"] = "Bearer " + TOKEN;
+  if (body) opt.body = JSON.stringify(body);
+  const r = await fetch(API + path, opt);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.detail || r.statusText);
+  return data;
+}
+
+async function load() {
+  if (!link) { document.body.innerHTML = "<p>缺少 link 参数</p>"; return; }
+  try {
+    survey = await api("GET", "/s/" + link);
+    document.getElementById("title").textContent = survey.title;
+    document.getElementById("desc").textContent = survey.description || "";
+    orders = survey.questions.map(q => q.order).sort((a, b) => a - b);
+    render();
+  } catch (e) {
+    document.getElementById("title").textContent = "加载失败";
+    document.getElementById("msg").innerHTML = `<p class="err">${e.message}</p>`;
+  }
+}
+
+function getQ(order) { return survey.questions.find(q => q.order === order); }
+
+function render() {
+  const form = document.getElementById("form");
+  form.innerHTML = "";
+  // 显示所有题(简化:不做跳转,展示全部),如要做跳转根据 currentOrder 只显示一题
+  // 这里直接全部显示,提交时按顺序提交
+  survey.questions.forEach(q => {
+    const div = document.createElement("div");
+    div.className = "q";
+    div.innerHTML = `<h4>${q.order}. ${escapeHtml(q.text)} ${q.required ? '<span style="color:#c00">*</span>' : ''}</h4>`;
+    if (q.type === "single") {
+      q.options.forEach(opt => {
+        div.innerHTML += `<label><input type="radio" name="q_${q.id}" value="${escapeHtml(opt)}"> ${escapeHtml(opt)}</label><br>`;
+      });
+    } else if (q.type === "multiple") {
+      q.options.forEach(opt => {
+        div.innerHTML += `<label><input type="checkbox" name="q_${q.id}" value="${escapeHtml(opt)}"> ${escapeHtml(opt)}</label><br>`;
+      });
+      if (q.min_select || q.max_select || q.exact_select) {
+        const hints = [];
+        if (q.exact_select) hints.push(`必须选 ${q.exact_select} 个`);
+        else {
+          if (q.min_select) hints.push(`至少 ${q.min_select}`);
+          if (q.max_select) hints.push(`最多 ${q.max_select}`);
+        }
+        div.innerHTML += `<div class="muted">${hints.join(", ")}</div>`;
+      }
+    } else if (q.type === "text") {
+      div.innerHTML += `<textarea name="q_${q.id}" rows="3" style="width:100%"></textarea>`;
+      if (q.text_min_len || q.text_max_len) {
+        const hints = [];
+        if (q.text_min_len) hints.push(`≥${q.text_min_len}字`);
+        if (q.text_max_len) hints.push(`≤${q.text_max_len}字`);
+        div.innerHTML += `<div class="muted">${hints.join(", ")}</div>`;
+      }
+    } else if (q.type === "number") {
+      div.innerHTML += `<input type="number" name="q_${q.id}" step="${q.integer_only ? '1' : 'any'}">`;
+      const hints = [];
+      if (q.number_min !== null && q.number_min !== undefined) hints.push(`≥${q.number_min}`);
+      if (q.number_max !== null && q.number_max !== undefined) hints.push(`≤${q.number_max}`);
+      if (q.integer_only) hints.push("整数");
+      if (hints.length) div.innerHTML += `<div class="muted">${hints.join(", ")}</div>`;
+    }
+    form.appendChild(div);
+  });
+}
+
+function collectAnswers() {
+  const result = [];
+  for (const q of survey.questions) {
+    const name = `q_${q.id}`;
+    if (q.type === "single") {
+      const el = document.querySelector(`input[name="${name}"]:checked`);
+      result.push({ question_id: q.id, value: el ? el.value : "" });
+    } else if (q.type === "multiple") {
+      const els = document.querySelectorAll(`input[name="${name}"]:checked`);
+      result.push({ question_id: q.id, value: Array.from(els).map(e => e.value) });
+    } else if (q.type === "text") {
+      const el = document.querySelector(`textarea[name="${name}"]`);
+      result.push({ question_id: q.id, value: el ? el.value : "" });
+    } else if (q.type === "number") {
+      const el = document.querySelector(`input[name="${name}"]`);
+      const v = el && el.value !== "" ? Number(el.value) : "";
+      result.push({ question_id: q.id, value: v });
+    }
+  }
+  return result;
+}
+
+async function submit() {
+  const msg = document.getElementById("msg");
+  msg.innerHTML = "提交中…";
+  try {
+    const answers = collectAnswers();
+    await api("POST", "/s/" + link + "/submit", { answers });
+    msg.innerHTML = `<p class="ok">提交成功!感谢您的参与。</p>`;
+    document.querySelector("button").disabled = true;
+  } catch (e) {
+    msg.innerHTML = `<p class="err">${e.message}</p>`;
+  }
+}
+
+function escapeHtml(s) { return (s||"").replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"})[c]); }
+
+load();
+</script>
+</body>
+</html>

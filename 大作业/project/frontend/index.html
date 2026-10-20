@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>问卷系统 - 管理后台</title>
+<style>
+  body { font-family: -apple-system, "Segoe UI", sans-serif; max-width: 960px; margin: 24px auto; padding: 0 16px; }
+  h1, h2 { color: #333; }
+  input, button, select, textarea { padding: 6px 10px; margin: 4px 0; font-size: 14px; }
+  button { cursor: pointer; }
+  pre { background: #f4f4f4; padding: 8px; border-radius: 4px; overflow: auto; }
+  .card { border: 1px solid #ddd; padding: 12px; margin: 12px 0; border-radius: 6px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .tag { background: #eef; padding: 2px 8px; border-radius: 4px; font-size: 12px; }
+  .muted { color: #888; font-size: 12px; }
+  .err { color: #c00; }
+  .ok { color: #0a0; }
+  hr { border: none; border-top: 1px solid #eee; margin: 24px 0; }
+</style>
+</head>
+<body>
+<h1>问卷系统</h1>
+<div id="auth">
+  <h2>登录 / 注册</h2>
+  <div class="row">
+    <input id="username" placeholder="用户名 (3-32 位)">
+    <input id="password" type="password" placeholder="密码 (≥6 位)">
+    <button onclick="register()">注册</button>
+    <button onclick="login()">登录</button>
+  </div>
+  <div id="auth-msg" class="muted"></div>
+</div>
+
+<div id="app" style="display:none">
+  <div class="row">
+    <span>当前用户: <b id="me"></b></span>
+    <button onclick="logout()">退出</button>
+  </div>
+
+  <hr>
+  <h2>我的问卷</h2>
+  <div class="card">
+    <h3>创建问卷</h3>
+    <input id="new-title" placeholder="问卷标题" style="width: 300px"><br>
+    <textarea id="new-desc" placeholder="问卷说明" rows="2" style="width: 300px"></textarea><br>
+    <label><input type="checkbox" id="new-anon"> 允许匿名填写</label><br>
+    <button onclick="createSurvey()">创建</button>
+  </div>
+
+  <div id="survey-list"></div>
+
+  <hr>
+  <h2>答题测试</h2>
+  <p class="muted">发布后,直接访问 <code>/fill.html?link=&lt;短码&gt;</code> 即可填写。</p>
+</div>
+
+<script>
+const API = location.origin + "/api";
+let TOKEN = localStorage.getItem("token") || "";
+let ME = JSON.parse(localStorage.getItem("me") || "null");
+
+function setMsg(el, msg, ok=true) {
+  el.textContent = msg;
+  el.className = ok ? "ok" : "err";
+}
+
+async function api(method, path, body=null) {
+  const opt = { method, headers: { "Content-Type": "application/json" } };
+  if (TOKEN) opt.headers["Authorization"] = "Bearer " + TOKEN;
+  if (body) opt.body = JSON.stringify(body);
+  const r = await fetch(API + path, opt);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.detail || r.statusText);
+  return data;
+}
+
+async function register() {
+  const msg = document.getElementById("auth-msg");
+  try {
+    const u = document.getElementById("username").value.trim();
+    const p = document.getElementById("password").value;
+    const r = await api("POST", "/auth/register", { username: u, password: p });
+    setMsg(msg, "注册成功!用户 id=" + r.user_id, true);
+  } catch (e) { setMsg(msg, e.message, false); }
+}
+
+async function login() {
+  const msg = document.getElementById("auth-msg");
+  try {
+    const u = document.getElementById("username").value.trim();
+    const p = document.getElementById("password").value;
+    const r = await api("POST", "/auth/login", { username: u, password: p });
+    TOKEN = r.token;
+    ME = { id: r.user_id, username: r.username };
+    localStorage.setItem("token", TOKEN);
+    localStorage.setItem("me", JSON.stringify(ME));
+    setMsg(msg, "登录成功", true);
+    showApp();
+  } catch (e) { setMsg(msg, e.message, false); }
+}
+
+function logout() {
+  TOKEN = ""; ME = null;
+  localStorage.clear();
+  document.getElementById("auth").style.display = "block";
+  document.getElementById("app").style.display = "none";
+}
+
+async function showApp() {
+  document.getElementById("auth").style.display = "none";
+  document.getElementById("app").style.display = "block";
+  document.getElementById("me").textContent = ME.username + " (" + ME.id + ")";
+  await loadSurveys();
+}
+
+async function createSurvey() {
+  const title = document.getElementById("new-title").value.trim();
+  if (!title) { alert("请输入标题"); return; }
+  const body = {
+    title,
+    description: document.getElementById("new-desc").value,
+    allow_anonymous: document.getElementById("new-anon").checked,
+  };
+  try {
+    await api("POST", "/surveys", body);
+    document.getElementById("new-title").value = "";
+    document.getElementById("new-desc").value = "";
+    await loadSurveys();
+  } catch (e) { alert(e.message); }
+}
+
+async function loadSurveys() {
+  const list = document.getElementById("survey-list");
+  list.innerHTML = "<p class='muted'>加载中…</p>";
+  try {
+    const data = await api("GET", "/surveys");
+    if (data.length === 0) { list.innerHTML = "<p class='muted'>还没有问卷</p>"; return; }
+    list.innerHTML = "";
+    for (const s of data) {
+      const div = document.createElement("div");
+      div.className = "card";
+      div.innerHTML = `
+        <h3>${escapeHtml(s.title)} <span class="tag">${s.status}</span></h3>
+        <div class="muted">id: ${s.id} | 创建: ${s.created_at}</div>
+        <p>${escapeHtml(s.description || "")}</p>
+        <div class="row">
+          ${s.public_link ? `<a class="tag" href="/fill.html?link=${s.public_link}" target="_blank">公开链接 /fill.html?link=${s.public_link}</a>` : ""}
+          <button onclick="addQuestion('${s.id}')">+ 加题</button>
+          <button onclick="listQuestions('${s.id}', this)">查看题目</button>
+          <button onclick="publish('${s.id}')">发布</button>
+          <button onclick="closeSurvey('${s.id}')">关闭</button>
+          <button onclick="viewStats('${s.id}')">查看统计</button>
+          <button onclick="del('${s.id}')">删除</button>
+        </div>
+        <div class="qlist"></div>
+      `;
+      list.appendChild(div);
+    }
+  } catch (e) { list.innerHTML = `<p class="err">${e.message}</p>`; }
+}
+
+async function addQuestion(sid) {
+  const type = prompt("题型: single / multiple / text / number", "single");
+  if (!type) return;
+  const text = prompt("题目内容", "你的性别");
+  if (!text) return;
+  let body = { type, text, required: true };
+  if (type === "single" || type === "multiple") {
+    const opts = prompt("选项,用逗号分隔", "男,女,其他");
+    body.options = opts.split(",").map(s => s.trim()).filter(Boolean);
+  }
+  if (type === "multiple") {
+    const min = prompt("至少选几(留空不限)", "");
+    if (min) body.min_select = parseInt(min);
+    const max = prompt("最多选几(留空不限)", "");
+    if (max) body.max_select = parseInt(max);
+  }
+  if (type === "number") {
+    body.integer_only = confirm("必须为整数?");
+    const min = prompt("最小值(留空不限)", "0");
+    if (min) body.number_min = parseFloat(min);
+    const max = prompt("最大值(留空不限)", "120");
+    if (max) body.number_max = parseFloat(max);
+  }
+  if (type === "text") {
+    const max = prompt("最多字数(留空不限)", "");
+    if (max) body.text_max_len = parseInt(max);
+  }
+  try {
+    await api("POST", `/surveys/${sid}/questions`, body);
+    alert("已添加");
+  } catch (e) { alert(e.message); }
+}
+
+async function listQuestions(sid, btn) {
+  const card = btn.closest(".card");
+  const div = card.querySelector(".qlist");
+  try {
+    const data = await api("GET", `/surveys/${sid}/questions`);
+    div.innerHTML = data.map(q => `<div>${q.order}. [${q.type}] ${escapeHtml(q.text)} ${q.required?'*':''} ${q.options?`(${q.options.join('/')})`:''}</div>`).join("");
+  } catch (e) { div.innerHTML = `<span class="err">${e.message}</span>`; }
+}
+
+async function publish(sid) {
+  if (!confirm("确认发布?")) return;
+  try {
+    await api("POST", `/surveys/${sid}/publish`);
+    await loadSurveys();
+  } catch (e) { alert(e.message); }
+}
+
+async function closeSurvey(sid) {
+  if (!confirm("确认关闭?")) return;
+  try {
+    await api("POST", `/surveys/${sid}/close`);
+    await loadSurveys();
+  } catch (e) { alert(e.message); }
+}
+
+async function del(sid) {
+  if (!confirm("确认删除(连同题目和回答)?此操作不可恢复")) return;
+  try {
+    await api("DELETE", `/surveys/${sid}`);
+    await loadSurveys();
+  } catch (e) { alert(e.message); }
+}
+
+function viewStats(sid) {
+  window.open("/stats.html?sid=" + sid, "_blank");
+}
+
+function escapeHtml(s) { return (s||"").replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"})[c]); }
+
+if (TOKEN) showApp();
+</script>
+</body>
+</html>

@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>问卷统计</title>
+<style>
+  body { font-family: -apple-system, "Segoe UI", sans-serif; max-width: 960px; margin: 24px auto; padding: 0 16px; }
+  .q { border: 1px solid #ddd; padding: 12px; margin: 12px 0; border-radius: 6px; }
+  .bar { background: #4f9; height: 16px; display: inline-block; border-radius: 3px; }
+  .muted { color: #888; font-size: 12px; }
+  table { border-collapse: collapse; }
+  td, th { border: 1px solid #ddd; padding: 4px 8px; }
+</style>
+</head>
+<body>
+<h1 id="title">统计</h1>
+<div id="total" class="muted"></div>
+<div id="content"></div>
+
+<script>
+const params = new URLSearchParams(location.search);
+const sid = params.get("sid");
+let TOKEN = localStorage.getItem("token") || "";
+const API = location.origin + "/api";
+
+async function api(method, path) {
+  const r = await fetch(API + path, { method, headers: { "Authorization": "Bearer " + TOKEN } });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.detail || r.statusText);
+  return data;
+}
+
+async function load() {
+  if (!sid) { document.body.innerHTML = "<p>缺少 sid</p>"; return; }
+  try {
+    const data = await api("GET", "/surveys/" + sid + "/stats");
+    document.getElementById("total").textContent = `共 ${data.total_responses} 份回答`;
+    const c = document.getElementById("content");
+    c.innerHTML = "";
+    for (const q of data.questions) {
+      const div = document.createElement("div");
+      div.className = "q";
+      div.innerHTML = `<h3>${q.order}. ${escapeHtml(q.text)} <span class="muted">[${q.type}]</span></h3>`;
+      const s = q.stats;
+      if (q.type === "single" || q.type === "multiple") {
+        const max = Math.max(1, ...s.options.map(o => o.count));
+        let html = `<table><tr><th>选项</th><th>次数</th><th>占比</th><th></th></tr>`;
+        for (const o of s.options) {
+          const pct = (s.total_answered ? o.count / s.total_answered * 100 : 0).toFixed(1);
+          html += `<tr><td>${escapeHtml(o.option)}</td><td>${o.count}</td><td>${pct}%</td><td><div class="bar" style="width:${o.count/max*200}px"></div></td></tr>`;
+        }
+        html += "</table>";
+        div.innerHTML += html;
+      } else if (q.type === "number") {
+        div.innerHTML += `<p>回答数: ${s.count} | 平均: ${s.avg?.toFixed(2)} | 最小: ${s.min} | 最大: ${s.max}</p>`;
+      } else if (q.type === "text") {
+        div.innerHTML += `<p>共 ${s.total_answered} 条回答</p><pre>${escapeHtml(s.answers.join("\n"))}</pre>`;
+      }
+      c.appendChild(div);
+    }
+  } catch (e) {
+    document.getElementById("content").innerHTML = `<p style="color:#c00">${e.message}</p>`;
+  }
+}
+
+function escapeHtml(s) { return (s||"").replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"})[c]); }
+load();
+</script>
+</body>
+</html>
