@@ -45,6 +45,7 @@
     <textarea id="new-desc" placeholder="问卷说明" rows="2" style="width: 300px"></textarea><br>
     <label><input type="checkbox" id="new-anon"> 允许匿名填写</label><br>
     <button onclick="createSurvey()">创建</button>
+    <button onclick="window.open('/library.html','_blank')">📚 打开题目库</button>
   </div>
 
   <div id="survey-list"></div>
@@ -146,6 +147,7 @@ async function loadSurveys() {
         <div class="row">
           ${s.public_link ? `<a class="tag" href="/fill.html?link=${s.public_link}" target="_blank">公开链接 /fill.html?link=${s.public_link}</a>` : ""}
           <button onclick="addQuestion('${s.id}')">+ 加题</button>
+          <button onclick="pickFromLibrary('${s.id}')">📚 从题库选题</button>
           <button onclick="listQuestions('${s.id}', this)">查看题目</button>
           <button onclick="publish('${s.id}')">发布</button>
           <button onclick="closeSurvey('${s.id}')">关闭</button>
@@ -197,8 +199,63 @@ async function listQuestions(sid, btn) {
   const div = card.querySelector(".qlist");
   try {
     const data = await api("GET", `/surveys/${sid}/questions`);
-    div.innerHTML = data.map(q => `<div>${q.order}. [${q.type}] ${escapeHtml(q.text)} ${q.required?'*':''} ${q.options?`(${q.options.join('/')})`:''}</div>`).join("");
+    div.innerHTML = data.map(q => {
+      const src = q.template_id
+        ? `<span class="tag" title="来自题目库模板">题库 v${q.version}</span>`
+        : `<span class="muted">手写</span>`;
+      const frozen = q.frozen ? `<span class="tag" style="background:#fee">已冻结(问卷已发布,不可修改)</span>` : "";
+      const opts = q.options ? `(${q.options.join("/")})` : "";
+      const jump = (q.jumps && q.jumps.length) ? `<span class="tag">跳转 ${q.jumps.length} 条</span>` : "";
+      return `<div>${q.order}. [${q.type}] ${escapeHtml(q.text)} ${q.required?'*':''} ${opts} ${src} ${frozen} ${jump}</div>`;
+    }).join("");
   } catch (e) { div.innerHTML = `<span class="err">${e.message}</span>`; }
+}
+
+/**
+ * 第二阶段:从题目库选题
+ * 弹出题目库列表,选中后把该题(可指定版本)加入问卷。
+ */
+async function pickFromLibrary(sid) {
+  let list;
+  try {
+    list = await api("GET", "/library/questions?scope=all");
+  } catch (e) { alert(e.message); return; }
+
+  if (!list.length) {
+    alert("题目库还是空的,请先到 /library.html 保存几道常用题");
+    return;
+  }
+
+  // 构建选择列表
+  const lines = list.map((t, i) => {
+    const c = t.content || {};
+    const opts = (c.options || []).join("/");
+    return `${i + 1}. [${t.name}] ${c.text} ${opts ? "(" + opts + ")" : ""} — 当前v${t.current_version}`;
+  }).join("\n");
+
+  const idx = prompt(
+    "选择要加入的题目(输入序号):\n\n" + lines +
+    "\n\n提示:输入序号后可加版本,如 1@v1"
+  );
+  if (!idx) return;
+
+  let n = parseInt(idx);
+  let ver = null;
+  const at = idx.indexOf("@v");
+  if (at > 0) {
+    n = parseInt(idx.slice(0, at));
+    ver = parseInt(idx.slice(at + 2));
+  }
+  if (isNaN(n) || n < 1 || n > list.length) { alert("序号无效"); return; }
+
+  const t = list[n - 1];
+  try {
+    const body = { template_id: t.id };
+    if (ver) body.version = ver;
+    const r = await api("POST", `/surveys/${sid}/questions`, body);
+    alert(`已加入「${r.text}」(v${r.version})`);
+    loadSurveys();
+  } catch (e) { alert(e.message); }
 }
 
 async function publish(sid) {

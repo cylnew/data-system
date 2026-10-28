@@ -15,6 +15,18 @@
 <body>
 <h1 id="title">统计</h1>
 <div id="total" class="muted"></div>
+
+<!-- 第二阶段:题目跨问卷统计模式(需求8) -->
+<div class="card">
+  <h3>📚 按题目查看跨问卷统计</h3>
+  <div class="row">
+    <input id="lib-q" placeholder="搜索题目名..." style="width:200px">
+    <select id="lib-ver"><option value="">全部版本</option></select>
+    <button onclick="loadLibrary()">搜索题目</button>
+  </div>
+  <div id="lib-list"></div>
+</div>
+
 <div id="content"></div>
 
 <script>
@@ -64,6 +76,70 @@ async function load() {
 }
 
 function escapeHtml(s) { return (s||"").replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"})[c]); }
+
+/**
+ * 第二阶段:题目库搜索 + 单题跨问卷统计(需求8)
+ */
+async function loadLibrary() {
+  const box = document.getElementById("lib-list");
+  const q = document.getElementById("lib-q").value.trim();
+  try {
+    const data = await api("GET", `/library/questions?scope=all&q=${encodeURIComponent(q)}`);
+    if (!data.length) { box.innerHTML = "<p class='muted'>没有匹配的题目</p>"; return; }
+    box.innerHTML = "";
+    for (const t of data) {
+      const c = t.content || {};
+      const div = document.createElement("div");
+      div.className = "q";
+      div.innerHTML = `
+        <div class="row">
+          <b>${escapeHtml(t.name)}</b>
+          <span class="muted">${escapeHtml(c.text || "")}</span>
+          <span class="tag">v${t.current_version}</span>
+          <span class="tag">${t.usage_count} 个问卷使用</span>
+          <button onclick="showTemplateStats('${t.id}')">查看总体分布</button>
+        </div>`;
+      box.appendChild(div);
+    }
+  } catch (e) { box.innerHTML = `<p style="color:#c00">${e.message}</p>`; }
+}
+
+async function showTemplateStats(tid) {
+  const ver = document.getElementById("lib-ver").value;
+  const url = `/library/questions/${tid}/stats` + (ver ? `?version=${ver}` : "");
+  const box = document.getElementById("lib-list");
+  try {
+    const d = await api("GET", url);
+    const s = d.stats;
+    let html = `<div class="q"><h3>${escapeHtml(d.template_name)} — 总体分布</h3>`;
+    html += `<p class="muted">共 ${d.total_surveys} 个问卷使用,累计 ${d.total_responses} 条回答</p>`;
+    if (s.options) {
+      const max = Math.max(1, ...s.options.map(o => o.count));
+      html += "<table><tr><th>选项</th><th>次数</th><th>占比</th><th></th></tr>";
+      for (const o of s.options) {
+        const pct = (s.total_answered ? o.count / s.total_answered * 100 : 0).toFixed(1);
+        html += `<tr><td>${escapeHtml(o.option)}</td><td>${o.count}</td><td>${pct}%</td><td><div class="bar" style="width:${o.count/max*200}px"></div></td></tr>`;
+      }
+      html += "</table>";
+    } else if (s.count !== undefined) {
+      html += `<p>回答数: ${s.count} | 平均: ${s.avg?.toFixed(2)} | 最小: ${s.min} | 最大: ${s.max}</p>`;
+    } else if (s.answers) {
+      html += `<pre>${escapeHtml(s.answers.join("\n"))}</pre>`;
+    }
+    if (d.by_version && d.by_version.length) {
+      html += "<h4>按版本分布</h4><table><tr><th>版本</th><th>回答数</th></tr>";
+      for (const v of d.by_version) html += `<tr><td>v${v.version}</td><td>${v.total_responses}</td></tr>`;
+      html += "</table>";
+    }
+    html += "<h4>各问卷明细</h4><table><tr><th>问卷</th><th>状态</th><th>版本</th><th>回答数</th></tr>";
+    for (const i of d.instances) {
+      html += `<tr><td>${escapeHtml(i.survey_title)}</td><td>${i.survey_status}</td><td>v${i.version}</td><td>${i.total_responses}</td></tr>`;
+    }
+    html += "</table></div>";
+    box.innerHTML = html + box.innerHTML;
+  } catch (e) { box.innerHTML = `<p style="color:#c00">${e.message}</p>`; }
+}
+
 load();
 </script>
 </body>

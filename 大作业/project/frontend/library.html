@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>题目库</title>
+<style>
+  body { font-family: -apple-system, "Segoe UI", sans-serif; max-width: 1000px; margin: 24px auto; padding: 0 16px; }
+  h1, h2, h3 { color: #333; }
+  input, button, select, textarea { padding: 6px 10px; margin: 4px 0; font-size: 14px; }
+  button { cursor: pointer; }
+  pre { background: #f4f4f4; padding: 8px; border-radius: 4px; overflow: auto; }
+  .card { border: 1px solid #ddd; padding: 12px; margin: 12px 0; border-radius: 6px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .tag { background: #eef; padding: 2px 8px; border-radius: 4px; font-size: 12px; }
+  .tag.bank { background: #efe; }
+  .tag.shared { background: #ffe; }
+  .muted { color: #888; font-size: 12px; }
+  .err { color: #c00; }
+  .ok { color: #0a0; }
+  hr { border: none; border-top: 1px solid #eee; margin: 24px 0; }
+  .bar { background: #4f9; height: 16px; display: inline-block; border-radius: 3px; }
+  table { border-collapse: collapse; }
+  td, th { border: 1px solid #ddd; padding: 4px 8px; }
+  .ver { border-left: 3px solid #8ab; padding-left: 10px; margin: 8px 0; }
+  .ver.fork { border-left-color: #fb8; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<h1>题目库</h1>
+<div id="auth">
+  <h2>登录</h2>
+  <div class="row">
+    <input id="username" placeholder="用户名">
+    <input id="password" type="password" placeholder="密码">
+    <button onclick="login()">登录</button>
+  </div>
+  <div id="auth-msg" class="muted"></div>
+</div>
+
+<div id="app" style="display:none">
+  <div class="row">
+    <span>当前用户: <b id="me"></b></span>
+    <input id="search" placeholder="搜索题目名..." style="width:180px" oninput="load()">
+    <select id="scope" onchange="load()">
+      <option value="all">全部(我的 + 共享 + 题库)</option>
+      <option value="mine">我创建的</option>
+      <option value="shared">共享给我的</option>
+      <option value="bank">题库</option>
+    </select>
+    <button onclick="logout()">退出</button>
+  </div>
+
+  <hr>
+  <h2>新建题目模板</h2>
+  <div class="card">
+    <div class="row">
+      <input id="t-name" placeholder="题目名称(如:年龄)" style="width:200px">
+      <select id="t-type">
+        <option value="single">单选</option>
+        <option value="multiple">多选</option>
+        <option value="text">文本</option>
+        <option value="number">数字</option>
+      </select>
+    </div>
+    <div><input id="t-text" placeholder="题目内容" style="width:400px"></div>
+    <div><textarea id="t-options" placeholder="选项(单选/多选必填),每行一个" rows="3" style="width:400px"></textarea></div>
+    <div class="row">
+      <label><input type="checkbox" id="t-required"> 必答</label>
+      <label><input type="checkbox" id="t-bank"> 加入题库</label>
+      <button onclick="createTemplate()">保存为模板</button>
+    </div>
+    <div id="create-msg" class="muted"></div>
+  </div>
+
+  <hr>
+  <h2>我的题目库</h2>
+  <div id="list"></div>
+</div>
+
+<script>
+const API = location.origin + "/api";
+let TOKEN = localStorage.getItem("token") || "";
+let ME = JSON.parse(localStorage.getItem("me") || "null");
+
+function setMsg(el, msg, ok=true) { el.textContent = msg; el.className = ok ? "ok" : "err"; }
+
+async function api(method, path, body=null) {
+  const opt = { method, headers: { "Content-Type": "application/json" } };
+  if (TOKEN) opt.headers["Authorization"] = "Bearer " + TOKEN;
+  if (body) opt.body = JSON.stringify(body);
+  const r = await fetch(API + path, opt);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail));
+  return data;
+}
+
+async function login() {
+  const msg = document.getElementById("auth-msg");
+  try {
+    const u = document.getElementById("username").value.trim();
+    const p = document.getElementById("password").value;
+    const r = await api("POST", "/auth/login", { username: u, password: p });
+    TOKEN = r.token; ME = { id: r.user_id, username: r.username };
+    localStorage.setItem("token", TOKEN);
+    localStorage.setItem("me", JSON.stringify(ME));
+    showApp();
+  } catch (e) { setMsg(msg, e.message, false); }
+}
+
+function logout() {
+  TOKEN = ""; ME = null; localStorage.clear();
+  location.reload();
+}
+
+function showApp() {
+  document.getElementById("auth").style.display = "none";
+  document.getElementById("app").style.display = "block";
+  document.getElementById("me").textContent = ME.username;
+  load();
+}
+
+async function createTemplate() {
+  const msg = document.getElementById("create-msg");
+  const type = document.getElementById("t-type").value;
+  const body = {
+    name: document.getElementById("t-name").value.trim(),
+    type,
+    text: document.getElementById("t-text").value.trim(),
+    required: document.getElementById("t-required").checked,
+    in_bank: document.getElementById("t-bank").checked,
+  };
+  if (type === "single" || type === "multiple") {
+    body.options = document.getElementById("t-options").value.split("\n").map(s => s.trim()).filter(Boolean);
+  }
+  try {
+    await api("POST", "/library/questions", body);
+    setMsg(msg, "已保存为模板(v1)", true);
+    document.getElementById("t-name").value = "";
+    document.getElementById("t-text").value = "";
+    document.getElementById("t-options").value = "";
+    load();
+  } catch (e) { setMsg(msg, e.message, false); }
+}
+
+async function load() {
+  const list = document.getElementById("list");
+  const scope = document.getElementById("scope").value;
+  const q = document.getElementById("search").value.trim();
+  try {
+    const data = await api("GET", `/library/questions?scope=${scope}&q=${encodeURIComponent(q)}`);
+    if (!data.length) { list.innerHTML = "<p class='muted'>没有题目</p>"; return; }
+    list.innerHTML = "";
+    for (const t of data) list.appendChild(renderTemplate(t));
+  } catch (e) { list.innerHTML = `<p class="err">${e.message}</p>`; }
+}
+
+function renderTemplate(t) {
+  const div = document.createElement("div");
+  div.className = "card";
+  const c = t.content || {};
+  const typeName = {single:"单选",multiple:"多选",text:"文本",number:"数字"}[c.type] || c.type;
+  let tags = `<span class="tag">v${t.current_version}</span>`;
+  if (t.in_bank) tags += ` <span class="tag bank">题库</span>`;
+  if (t.visibility === "shared") tags += ` <span class="tag shared">已共享</span>`;
+  tags += ` <span class="tag">被 ${t.usage_count} 个问卷使用</span>`;
+  const opts = (c.options || []).join(" / ");
+
+  div.innerHTML = `
+    <h3>${escapeHtml(t.name)} ${tags}</h3>
+    <div class="muted">${typeName} · ${escapeHtml(c.text || "")} ${opts ? "· (" + escapeHtml(opts) + ")" : ""}</div>
+    <div class="row" style="margin-top:8px">
+      <button onclick="editTemplate('${t.id}')">修改(生成新版本)</button>
+      <button onclick="showVersions('${t.id}')">版本历史</button>
+      <button onclick="showUsage('${t.id}')">被哪些问卷使用</button>
+      <button onclick="showStats('${t.id}')">跨问卷统计</button>
+      <button onclick="showShare('${t.id}')">共享</button>
+      <button onclick="toggleBank('${t.id}', ${!t.in_bank})">${t.in_bank ? "移出题库" : "加入题库"}</button>
+    </div>
+    <div class="detail"></div>
+  `;
+  return div;
+}
+
+async function editTemplate(tid) {
+  const cur = await api("GET", "/library/questions/" + tid);
+  const c = cur.content || {};
+  const type = prompt("题型: single / multiple / text / number", c.type);
+  if (!type) return;
+  const text = prompt("题目内容", c.text);
+  if (!text) return;
+  const body = { type, text, required: c.required, options: c.options };
+  if (type === "single" || type === "multiple") {
+    const o = prompt("选项,用逗号分隔", (c.options || []).join(","));
+    if (o === null) return;
+    body.options = o.split(",").map(s => s.trim()).filter(Boolean);
+  }
+  const note = prompt("改动说明(可选)", "");
+  if (note === null) return;
+  body.change_note = note;
+  try {
+    const r = await api("PUT", "/library/questions/" + tid, body);
+    alert(`已生成新版本 v${r.current_version}(旧版本保留,已发布的问卷不受影响)`);
+    load();
+  } catch (e) { alert(e.message); }
+}
+
+async function showVersions(tid) {
+  const card = document.querySelector(`[onclick*="${tid}"]`)?.closest(".card");
+  const div = card.querySelector(".detail");
+  try {
+    const vs = await api("GET", `/library/questions/${tid}/versions`);
+    let html = `<h4>版本历史(v${vs.length} 个)</h4>`;
+    for (const v of vs) {
+      const lineage = v.parent_version ? `← 源自 v${v.parent_version}` : "(初始版本)";
+      const fork = v.branch_from ? ` · 分叉自 v${v.branch_from}` : "";
+      html += `<div class="ver ${v.branch_from ? "fork" : ""}">
+        <b>v${v.version}</b> ${escapeHtml(v.text)} ${lineage}${fork}
+        <div class="muted">${escapeHtml(v.change_note || "")} · ${v.created_at || ""}</div>
+        <div class="row">
+          <button onclick="restoreVersion('${tid}', ${v.version})">恢复此版本</button>
+          <button onclick="forkVersion('${tid}', ${v.version})">基于此版本分叉</button>
+        </div>
+      </div>`;
+    }
+    div.innerHTML = html;
+    div.scrollIntoView({behavior:"smooth"});
+  } catch (e) { div.innerHTML = `<p class="err">${e.message}</p>`; }
+}
+
+async function restoreVersion(tid, v) {
+  if (!confirm(`确认恢复到 v${v}?(将以旧版内容生成一个新版本,历史不丢)`)) return;
+  try {
+    const r = await api("POST", `/library/questions/${tid}/versions/${v}/restore`);
+    alert(`已恢复,当前版本 v${r.current_version}`);
+    showVersions(tid); load();
+  } catch (e) { alert(e.message); }
+}
+
+async function forkVersion(tid, v) {
+  if (!confirm(`确认基于 v${v} 分叉出新版本?`)) return;
+  try {
+    const r = await api("POST", `/library/questions/${tid}/versions/${v}/fork`);
+    alert(`已分叉,当前版本 v${r.current_version}`);
+    showVersions(tid); load();
+  } catch (e) { alert(e.message); }
+}
+
+async function showUsage(tid) {
+  const card = document.querySelector(`[onclick*="${tid}"]`)?.closest(".card");
+  const div = card.querySelector(".detail");
+  try {
+    const d = await api("GET", `/library/questions/${tid}/usage`);
+    let html = `<h4>被 ${d.total_surveys} 个问卷使用(当前版本 v${d.current_version})</h4>`;
+    html += "<table><tr><th>问卷</th><th>状态</th><th>使用的版本</th><th>已冻结</th></tr>";
+    for (const u of d.usage) {
+      html += `<tr><td>${escapeHtml(u.survey_title)}</td><td>${u.survey_status}</td><td>v${u.version}</td><td>${u.frozen ? "是" : "否"}</td></tr>`;
+    }
+    html += "</table>";
+    html += `<p class="muted">提示:修改题目会生成新版本,已发布问卷仍使用其原版本,数据不会错位。</p>`;
+    div.innerHTML = html;
+  } catch (e) { div.innerHTML = `<p class="err">${e.message}</p>`; }
+}
+
+async function showStats(tid) {
+  const card = document.querySelector(`[onclick*="${tid}"]`)?.closest(".card");
+  const div = card.querySelector(".detail");
+  try {
+    const d = await api("GET", `/library/questions/${tid}/stats`);
+    let html = `<h4>跨问卷统计</h4>`;
+    html += `<p>共 <b>${d.total_surveys}</b> 个问卷使用,累计 <b>${d.total_responses}</b> 条回答</p>`;
+    const s = d.stats;
+    if (s.options) {
+      const max = Math.max(1, ...s.options.map(o => o.count));
+      html += "<table><tr><th>选项</th><th>次数</th><th></th></tr>";
+      for (const o of s.options) {
+        html += `<tr><td>${escapeHtml(o.option)}</td><td>${o.count}</td><td><div class="bar" style="width:${o.count/max*200}px"></div></td></tr>`;
+      }
+      html += "</table>";
+    } else if (s.count !== undefined) {
+      html += `<p>回答数: ${s.count} | 平均: ${s.avg?.toFixed(2)} | 最小: ${s.min} | 最大: ${s.max}</p>`;
+    } else if (s.answers) {
+      html += `<pre>${escapeHtml(s.answers.join("\n"))}</pre>`;
+    }
+    if (d.by_version && d.by_version.length > 1) {
+      html += "<h4>按版本分布</h4><table><tr><th>版本</th><th>回答数</th></tr>";
+      for (const v of d.by_version) html += `<tr><td>v${v.version}</td><td>${v.total_responses}</td></tr>`;
+      html += "</table>";
+    }
+    div.innerHTML = html;
+  } catch (e) { div.innerHTML = `<p class="err">${e.message}</p>`; }
+}
+
+async function showShare(tid) {
+  const who = prompt("共享给哪个用户名?");
+  if (!who) return;
+  try {
+    await api("POST", `/library/questions/${tid}/share`, { username: who });
+    alert(`已共享给 ${who}`);
+    load();
+  } catch (e) { alert(e.message); }
+}
+
+async function toggleBank(tid, inBank) {
+  try {
+    await api("PUT", `/library/questions/${tid}/bank`, { in_bank: inBank });
+    load();
+  } catch (e) { alert(e.message); }
+}
+
+function escapeHtml(s) { return (s||"").replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"})[c]); }
+if (TOKEN) showApp();
+</script>
+</body>
+</html>

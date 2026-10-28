@@ -153,6 +153,11 @@ def publish_survey(survey_id: str, user: dict = Depends(get_current_user)):
         {"_id": oid},
         {"$set": {"status": "published", "public_link": link}},
     )
+    # 第二阶段:发布后冻结该问卷的所有题目(需求3 —— 已发布问卷的题不可再改)
+    db.questions.update_many(
+        {"survey_id": oid},
+        {"$set": {"frozen": True}},
+    )
     survey = db.surveys.find_one({"_id": oid})
     return _serialize(survey)
 

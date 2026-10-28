@@ -1,17 +1,20 @@
 # 基于 MongoDB 的在线问卷系统
 
-> 大作业一第一阶段 · 简化版问卷系统（对标 Google Forms / 问卷星）
+> 大作业一 · 第二阶段：题目库 / 题目版本 / 共享 / 跨问卷统计
 > 课程：当代数据管理系统
 
 一个基于 **MongoDB + FastAPI** 的在线问卷系统。用户注册后可创建问卷、添加多类型题目、配置条件跳转逻辑，发布后通过短链分享给其他人填写，系统自动聚合统计结果。
 
-**当前测试状态：`19 passed`** ✅
+**第二阶段新增**：题目可保存为**模板**重复使用、可**分享**给其他用户、修改时自动生成**新版本**（旧版本永不变，已发布问卷的题不受影响）、支持**版本历史与血缘追溯**、可查看题目**被哪些问卷使用**、可建立**题目库**、可查看单题**跨问卷总体统计**。
+
+**当前测试状态：`42 passed`** ✅（第一阶段 19 + 第二阶段 23）
 
 ---
 
 ## 目录
 
 - [功能特性](#功能特性)
+- [第二阶段需求实现对照](#第二阶段需求实现对照)
 - [技术栈](#技术栈)
 - [快速开始](#快速开始)
 - [项目结构](#项目结构)
@@ -55,6 +58,51 @@
 - 多选：各选项被选次数
 - 数字：`count` / `avg` / `min` / `max` / 全部 `values`
 - 文本：全部填写内容
+
+---
+
+## 第二阶段需求实现对照
+
+需求来源：`大作业一：需求变更.docx`（用户反馈驱动的 8 条新需求）
+
+核心设计 —— **模板 + 版本 + 实例 三层分离**：
+
+```
+question_templates   一道"题"的身份（归谁所有 / 是否入题库 / 是否共享）
+question_versions    该题内容的不可变快照（v1/v2/v3...，记录血缘 parent_version）
+questions（既有）    问卷里的一道题 = 引用某模板的某版本
+```
+
+这个结构让 8 条需求全部自然成立，而不需要任何"补丁式"的特殊判断。
+
+| # | 需求 | 实现方式 | 关键接口 |
+|---|---|---|---|
+| 1 | 保存常用题、重复使用 | 题目存为模板，一个模板可被多个问卷引用 | `POST /api/library/questions`<br>`POST /api/surveys/{id}/questions` 带 `template_id` |
+| 2 | 分享题目给别人 | `question_shares` 集合记录共享关系，共享者可在自己问卷中使用 | `POST /api/library/questions/{tid}/share` |
+| 3 | 已发布问卷的题不可改 | ① 发布时把题目标记 `frozen=true`；② 改模板只**新增版本**，旧版本文档永不变 | `PUT /api/surveys/{id}/questions/{order}` → 409 |
+| 4 | 记录题目修改历史 | `question_versions` 只增不改，`parent_version` 记录血缘，支持恢复 | `GET .../versions`、`POST .../versions/{v}/restore` |
+| 5 | 不同版本同时存在 | 问卷题引用固定版本号，A 用 v1、B 用 v2 互不影响 | `POST .../versions/{v}/fork` |
+| 6 | 查看题被哪些问卷使用 | `questions.template_id` 反查索引 | `GET .../usage` |
+| 7 | 建立题目库 | `question_templates.in_bank` 标记，入库后全员可见可用 | `PUT .../bank`、`GET /api/library/bank` |
+| 8 | 单题跨问卷统计 | 按 `template_id` 汇总实例题 `_id`，再对 `responses` 聚合 | `GET .../stats`（可选 `?version=N`） |
+
+### 三条"改题"路径的语义
+
+| 场景 | 行为 | 结果 |
+|---|---|---|
+| 改模板 | 生成新版本，旧版本不动 | 已发布问卷的题**内容不变**（需求3） |
+| 改草稿问卷里**来自模板**的题 | 自动 fork 新版本，本问卷改指向它 | 原模板不受影响，其他问卷也不受影响（需求5） |
+| 改草稿问卷里**手写**的题 | 直接改该题 | 只影响本问卷 |
+
+### 版本血缘示例
+
+```
+v1 (初始版本)
+ └─ v2  parent_version=1   "改成口语化表述"
+     └─ v3  parent_version=2   "恢复自 v1"   branch_from=1
+```
+
+恢复旧版本采用**以旧内容创建新版本**而非回滚，因此 `v1 → v2 → v3` 的链条完整保留，可追溯每一次改动。
 
 ---
 
@@ -111,6 +159,9 @@ uvicorn backend.main:app --reload
 启动后：
 
 - 首页 <http://127.0.0.1:8000/> （问卷管理台）
+- 题目库 <http://127.0.0.1:8000/library.html> （★第二阶段：模板 / 版本 / 共享 / 用量）
+- 填写页 <http://127.0.0.1:8000/fill.html?link=<短码>>
+- 统计页 <http://127.0.0.1:8000/stats.html?sid=<问卷ID>
 - API 文档 <http://127.0.0.1:8000/docs> （Swagger UI，自动生成）
 - 健康检查 <http://127.0.0.1:8000/health>
 
@@ -123,7 +174,16 @@ pytest
 预期输出：
 
 ```
-19 passed
+42 passed
+```
+
+### 7. 端到端演示（可选）
+
+```bash
+# 终端 1
+uvicorn backend.main:app --port 8000
+# 终端 2
+python e2e_demo.py
 ```
 
 ---
@@ -138,25 +198,29 @@ project/
 │   ├── db.py                 # MongoDB 连接 / 索引 / JSON Schema 校验器
 │   ├── auth.py               # bcrypt 哈希 + JWT 签发解析 + FastAPI 依赖
 │   ├── logic.py              # 纯函数：答案校验 + 跳转计算（无 DB 依赖）
-│   ├── stats.py              # 统计聚合逻辑
+│   ├── stats.py              # 统计聚合逻辑（单问卷 + 跨问卷）
 │   ├── routes_auth.py        # /api/auth/*
 │   ├── routes_surveys.py     # /api/surveys/*
-│   ├── routes_questions.py   # /api/surveys/{id}/questions/*
-│   └── routes_public.py      # /api/s/{link}/* + /api/surveys/{id}/stats
+│   ├── routes_questions.py   # /api/surveys/{id}/questions/*（含模板引用 / 修改 / 冻结）
+│   ├── routes_public.py      # /api/s/{link}/* + /api/surveys/{id}/stats
+│   └── routes_library.py     # ★ /api/library/*（第二阶段：模板 / 版本 / 共享 / 用量）
 │
 ├── frontend/                 # 原生 HTML 前端
-│   ├── index.html            # 问卷管理台（创建 / 发布 / 编辑题目）
+│   ├── index.html            # 问卷管理台（创建 / 发布 / 编辑题目 / 从题库选题）
 │   ├── fill.html             # 问卷填写页（跳转逻辑在此实现）
-│   └── stats.html            # 统计结果页
+│   ├── stats.html            # 统计结果页（+ 单题跨问卷统计）
+│   └── library.html          # ★ 题目库管理页（第二阶段）
 │
 ├── tests/
 │   ├── conftest.py           # drop_database fixture + 内存 ASGI 客户端
 │   ├── test_api.py           # 9 个端到端 API 测试
-│   └── test_logic.py         # 10 个纯函数逻辑测试
+│   ├── test_logic.py         # 10 个纯函数逻辑测试
+│   └── test_library.py       # ★ 23 个第二阶段测试（覆盖 8 条需求）
 │
 ├── docs/
 │   └── figures/              # 用例图 / 架构图 / ER 图 / 状态机 / 提交流程
 │
+├── e2e_demo.py               # ★ 端到端演示脚本（真实 HTTP，8 条需求全流程）
 ├── requirements.txt
 ├── pytest.ini
 ├── AI_USAGE_LOG.md           # AI 使用日志（作业要求 5.1）
@@ -247,7 +311,90 @@ project/
 }
 ```
 
-**索引**：`(survey_id, submitted_at DESC)`
+**索引**：`survey_id` + `submitted_at DESC`
+
+---
+
+### ★ question_templates — 题目模板（第二阶段）
+
+一道"题"的**身份**。它不包含具体题面，题面在版本里。
+
+```javascript
+{
+  _id: ObjectId,
+  owner_id: ObjectId,          // → users._id,创建者
+  name: "年龄",                 // 题目标题(便于在题库里搜索)
+  description: "",
+  tags: ["人口学"],             // 分类标签
+  visibility: "private",       // private | shared
+  current_version: 3,          // 当前最新版本号
+  version_count: 3,
+  in_bank: false,              // 是否加入题库(需求7)
+  created_at: ISODate(),
+  updated_at: ISODate()
+}
+```
+
+**索引**：
+- `(owner_id, updated_at DESC)` — "我的题目库"列表
+- `(in_bank, updated_at DESC)` — 题库列表
+- `name` — 题名搜索
+
+### ★ question_versions — 题目版本（第二阶段）
+
+题面的**不可变快照**。只增不改，永不 update/delete。
+
+```javascript
+{
+  _id: ObjectId,
+  template_id: ObjectId,       // → question_templates._id
+  version: 2,                  // 从 1 递增
+  parent_version: 1,           // 从哪一版改来(null = 原创)—— 需求4 血缘
+  branch_from: null,           // 从哪一版分叉(需求5)
+  type: "number",
+  text: "你的年龄",
+  required: true,
+  options: null,               // 仅单选/多选
+  min_select: null, max_select: null, exact_select: null,
+  number_min: 0, number_max: 150, integer_only: true,
+  text_min_len: null, text_max_len: null,
+  jumps: [],
+  change_note: "改成口语化表述",  // 本次改动说明
+  created_by: ObjectId,
+  created_at: ISODate()
+}
+```
+
+**索引**：`(template_id, version)` 唯一 — 保证同一模板下版本号不重复
+
+### ★ question_shares — 题目共享（第二阶段）
+
+```javascript
+{
+  _id: ObjectId,
+  template_id: ObjectId,       // → question_templates._id
+  from_user_id: ObjectId,      // 分享者
+  to_user_id: ObjectId,        // 被分享者
+  created_at: ISODate()
+}
+```
+
+**索引**：`(template_id, to_user_id)` 唯一 — 同一模板对同一用户只共享一次
+
+### ★ questions 的新增字段
+
+原有的 `questions` 集合只增加 3 个字段，其余保持不变（向后兼容）：
+
+```javascript
+{
+  ...原有字段...,
+  template_id: ObjectId | null,  // 来源模板(手写的新题为 null)
+  version: int | null,           // 使用的模板版本号
+  frozen: bool                   // true = 问卷已发布,不可再改(需求3)
+}
+```
+
+**新增索引**：`(template_id, survey_id)` — 支撑需求6「这道题被哪些问卷使用」的反查
 
 ### 设计决策
 
@@ -289,9 +436,41 @@ project/
 
 | 方法 | 路径 | 认证 | 说明 |
 |---|---|---|---|
-| POST | `/api/surveys/{id}/questions` | ✅ | 添加题目，自动分配 order |
-| GET | `/api/surveys/{id}/questions` | ✅ | 题目列表 |
-| DELETE | `/api/surveys/{id}/questions/{order}` | ✅ | 按 order 删除 |
+| POST | `/api/surveys/{id}/questions` | ✅ | 添加题目，自动分配 order。**可带 `template_id`(+可选 `version`)从题目库选题** |
+| GET | `/api/surveys/{id}/questions` | ✅ | 题目列表（含 `template_id` / `version` / `frozen`） |
+| PUT | `/api/surveys/{id}/questions/{order}` | ✅ | **★第二阶段** 修改题目。已发布问卷返回 409 |
+| DELETE | `/api/surveys/{id}/questions/{order}` | ✅ | 按 order 删除（已发布问卷返回 409） |
+
+### ★ 题目库 / 模板 / 版本（第二阶段）
+
+| 方法 | 路径 | 认证 | 说明 |
+|---|---|---|---|
+| POST | `/api/library/questions` | ✅ | 保存题目为模板（自动创建 v1） |
+| GET | `/api/library/questions` | ✅ | 题目库列表。`?scope=all\|mine\|shared\|bank` `&q=关键词` |
+| GET | `/api/library/questions/{tid}` | ✅ | 模板详情（含当前版本内容、用量） |
+| PUT | `/api/library/questions/{tid}` | ✅ | **修改 → 生成新版本**，旧版本永不变 |
+| GET | `/api/library/questions/{tid}/versions` | ✅ | 版本历史（含 `parent_version` 血缘） |
+| GET | `/api/library/questions/{tid}/versions/{v}` | ✅ | 某版本详情 |
+| POST | `/api/library/questions/{tid}/versions/{v}/restore` | ✅ | 恢复旧版本（以旧内容建新版本） |
+| POST | `/api/library/questions/{tid}/versions/{v}/fork` | ✅ | 基于某版分叉出新版本 |
+| GET | `/api/library/questions/{tid}/usage` | ✅ | **被哪些问卷使用**（含各问卷用的版本号） |
+| POST | `/api/library/questions/{tid}/share` | ✅ | 共享给其他用户（按 username） |
+| GET | `/api/library/questions/{tid}/shares` | ✅ | 共享情况：我给了谁 / 谁给我 |
+| DELETE | `/api/library/questions/{tid}/shares/{uid}` | ✅ | 取消共享 |
+| PUT | `/api/library/questions/{tid}/bank` | ✅ | 加入 / 移出题库 |
+| GET | `/api/library/bank` | ✅ | 题库列表 |
+| GET | `/api/library/questions/{tid}/stats` | ✅ | **单题跨问卷统计**，可选 `?version=N` |
+
+**从题库选题的请求体**：
+
+```json
+{
+  "template_id": "65f...",
+  "version": 2
+}
+```
+
+（`version` 省略则用模板当前版本）
 
 ### 公开访问与填写
 
@@ -363,7 +542,7 @@ pipeline = [
 pytest
 ```
 
-**当前结果：19 passed**
+**当前结果：42 passed**（第一阶段 19 + 第二阶段 23）
 
 ### 测试组织
 
@@ -371,8 +550,9 @@ pytest
 |---|---|---|
 | `tests/test_logic.py` | 10 | 纯函数测试，不依赖数据库 |
 | `tests/test_api.py` | 9 | 端到端 API 测试，走真实 MongoDB |
+| `tests/test_library.py` | 23 | ★第二阶段：模板 / 版本 / 共享 / 用量 / 跨问卷统计 |
 
-### 覆盖的 6 类必测场景
+### 覆盖的 6 类必测场景（第一阶段）
 
 | 要求 | 对应测试 |
 |---|---|
@@ -383,6 +563,31 @@ pytest
 | 提交问卷 | `test_submit_full_survey` |
 | 统计 | `test_statistics` |
 | （额外）用户隔离 | `test_list_only_own_surveys` |
+
+### ★ 第二阶段：8 条需求的测试对照
+
+| 需求 | 对应测试 |
+|---|---|
+| 1 保存常用题、重复使用 | `test_create_template`、`test_use_template_in_survey`、`test_template_reused_in_many_surveys`、`test_list_library_scopes` |
+| 2 分享给别人 | `test_share_to_other_user`、`test_shared_user_can_use`、`test_share_permission_denied` |
+| 3 已发布问卷的题不可改 | `test_published_question_immutable`、`test_draft_question_editable`、`test_published_survey_keeps_old_content` |
+| 4 修改历史 | `test_edit_creates_new_version`、`test_version_history_chain`、`test_restore_old_version` |
+| 5 不同版本并存 | `test_fork_version`、`test_different_versions_coexist`、`test_edit_template_question_in_draft_forks_version` |
+| 6 查看被哪些问卷使用 | `test_usage_lists_surveys`、`test_usage_reflects_version_split` |
+| 7 题目库 | `test_bank_add_remove`、`test_bank_visible_to_others` |
+| 8 跨问卷统计 | `test_cross_survey_stats`、`test_cross_survey_stats_filter_by_version`、`test_stats_permission_denied` |
+
+### 端到端演示脚本
+
+除了单元测试，还有一个**真实 HTTP** 的演示脚本，串起 8 条需求的完整业务故事（老师做题 → 分享给学生 → 学生建问卷选题 → 改题不影响老问卷 → 跨问卷统计）：
+
+```bash
+# 终端 1：启动服务
+uvicorn backend.main:app --port 8000
+
+# 终端 2：跑演示
+python e2e_demo.py
+```
 
 ### 测试环境隔离
 
@@ -398,6 +603,8 @@ pytest
 2. **`on_event` 已弃用** — FastAPI 建议改用 `lifespan` 上下文管理器，当前仅产生 DeprecationWarning，不影响功能
 3. **无速率限制** — 注册 / 登录 / 提交接口没有限流，生产环境需补充
 4. **匿名填写时无法防刷** — 未限制同一人多次提交（需求允许，故未实现限制）
+5. **题目共享暂不支持"撤销后立即失效"** — 被共享者若已在本地引用该模板，撤销共享后其问卷内容不受影响（内容是快照），这是版本不可变设计的必然结果
+6. **题库为全局可见** — 入库的题目所有注册用户可见，当前需求未区分"团队题库"与"个人题库"，若需团队隔离可在 `question_templates` 加 `group_id` 字段扩展
 
 ---
 
